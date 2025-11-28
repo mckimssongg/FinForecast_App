@@ -23,9 +23,12 @@ def reset_simulation():
 @st.cache_data
 def load_original_data():
     # Cargar CSVs
-    df_main = pd.read_csv('checking_account_main.csv')
-    df_sec = pd.read_csv('checking_account_secondary.csv')
-    df_cc = pd.read_csv('credit_card_account.csv')
+    try:
+        df_main = pd.read_csv('checking_account_main.csv')
+        df_sec = pd.read_csv('checking_account_secondary.csv')
+        df_cc = pd.read_csv('credit_card_account.csv')
+    except FileNotFoundError:
+        return None
     
     # Preprocesar
     for df in [df_main, df_sec, df_cc]:
@@ -57,6 +60,9 @@ def train_model(df):
     
     df_train = df_lags.dropna()
     
+    if df_train.empty:
+        return None, None
+
     X = df_train[[f'sales_lag_{i}' for i in [1, 2, 4]] + [f'expenses_lag_{i}' for i in [1, 2, 4]]]
     y_s = df_train['sales']
     y_e = df_train['expenses']
@@ -67,10 +73,9 @@ def train_model(df):
     return model_s, model_e
 
 # Cargar datos base
-try:
-    df_original = load_original_data()
-except:
-    st.error("No se encuentran los archivos CSV originales.")
+df_original = load_original_data()
+if df_original is None:
+    st.error("No se encuentran los archivos CSV originales (checking_account_main.csv, etc).")
     st.stop()
 
 # --- 3. BARRA LATERAL: INYECCIÓN DE DATOS ---
@@ -82,8 +87,11 @@ df_total['date'] = pd.to_datetime(df_total['date'])
 df_total = df_total.sort_values('date').reset_index(drop=True)
 
 # Calcular fecha sugerida (Siguiente Lunes)
-last_date = df_total['date'].iloc[-1]
-next_date = last_date + pd.Timedelta(days=7)
+if not df_total.empty:
+    last_date = df_total['date'].iloc[-1]
+    next_date = last_date + pd.Timedelta(days=7)
+else:
+    next_date = pd.Timestamp.today()
 
 st.sidebar.subheader("Agregar Nueva Semana")
 st.sidebar.info(f"Fecha sugerida: {next_date.date()}")
@@ -103,26 +111,29 @@ if st.sidebar.button("Borrar Simulación (Reset)"):
 
 # --- 4. VISUALIZACIÓN DE DATOS ---
 # KPIs
-last_sales = df_total['sales'].iloc[-1]
-last_expenses = df_total['expenses'].iloc[-1]
-prev_sales = df_total['sales'].iloc[-2] if len(df_total) > 1 else last_sales
-sales_delta = last_sales - prev_sales
-expenses_delta = last_expenses - (df_total['expenses'].iloc[-2] if len(df_total) > 1 else last_expenses)
+if not df_total.empty:
+    last_sales = df_total['sales'].iloc[-1]
+    last_expenses = df_total['expenses'].iloc[-1]
+    prev_sales = df_total['sales'].iloc[-2] if len(df_total) > 1 else last_sales
+    sales_delta = last_sales - prev_sales
+    expenses_delta = last_expenses - (df_total['expenses'].iloc[-2] if len(df_total) > 1 else last_expenses)
 
-col1, col2, col3 = st.columns(3)
-col1.metric("Ventas (Última Semana)", f"${last_sales:,.2f}", f"{sales_delta:,.2f}")
-col2.metric("Gastos (Última Semana)", f"${last_expenses:,.2f}", f"{expenses_delta:,.2f}", delta_color="inverse")
-col3.metric("Semanas Simuladas", len(st.session_state['new_data']))
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Ventas (Última Semana)", f"${last_sales:,.2f}", f"{sales_delta:,.2f}")
+    col2.metric("Gastos (Última Semana)", f"${last_expenses:,.2f}", f"{expenses_delta:,.2f}", delta_color="inverse")
+    col3.metric("Semanas Simuladas", len(st.session_state['new_data']))
 
 st.divider()
 
 st.subheader("Evolución de Ventas y Gastos")
 
 # Gráfico interactivo
-# Asegurar tipos de datos correctos para evitar errores de Streamlit
-df_total['sales'] = df_total['sales'].astype(float)
-df_total['expenses'] = df_total['expenses'].astype(float)
-st.line_chart(df_total, x='date', y=['sales', 'expenses'])
+if not df_total.empty:
+    # Asegurar tipos de datos correctos para evitar errores de Streamlit
+    df_total['sales'] = df_total['sales'].astype(float)
+    df_total['expenses'] = df_total['expenses'].astype(float)
+    
+    st.line_chart(df_total, x='date', y=['sales', 'expenses'])
 
 # Tabla de datos en expander
 with st.expander("Ver datos detallados"):
@@ -142,37 +153,39 @@ if st.button("Entrenar IA con Datos Actuales y Predecir", type="primary"):
         # 1. Re-entrenar modelo en vivo con TODOS los datos (Real + Simulado)
         model_s_live, model_e_live = train_model(df_total)
         
-        # 2. Predecir recursivamente
-        history_sales = list(df_total['sales'].values)
-        history_expenses = list(df_total['expenses'].values)
-        
-        future_dates = pd.date_range(start=df_total['date'].iloc[-1] + pd.Timedelta(days=7), periods=4, freq='W-MON')
-        predictions = []
-        
-        for date in future_dates:
-            features = [
-                history_sales[-1], history_sales[-2], history_sales[-4],
-                history_expenses[-1], history_expenses[-2], history_expenses[-4]
-            ]
+        if model_s_live is None:
+            st.error("No hay suficientes datos para entrenar el modelo.")
+        else:
+            # 2. Predecir recursivamente
+            history_sales = list(df_total['sales'].values)
+            history_expenses = list(df_total['expenses'].values)
             
-            # Predecir con el modelo nuevo
-            pred_s = model_s_live.predict([features])[0]
-            pred_e = model_e_live.predict([features])[0]
+            future_dates = pd.date_range(start=df_total['date'].iloc[-1] + pd.Timedelta(days=7), periods=4, freq='W-MON')
+            predictions = []
             
-            predictions.append({'Fecha': date.date(), 'Ventas Proyectadas': pred_s, 'Gastos Proyectados': pred_e})
+            for date in future_dates:
+                features = [
+                    history_sales[-1], history_sales[-2], history_sales[-4],
+                    history_expenses[-1], history_expenses[-2], history_expenses[-4]
+                ]
+                
+                # Predecir con el modelo nuevo
+                pred_s = model_s_live.predict([features])[0]
+                pred_e = model_e_live.predict([features])[0]
+                
+                predictions.append({'Fecha': date, 'Ventas Proyectadas': float(pred_s), 'Gastos Proyectados': float(pred_e)})
+                
+                history_sales.append(pred_s)
+                history_expenses.append(pred_e)
             
-            history_sales.append(pred_s)
-            history_expenses.append(pred_e)
-        
-        # 3. Mostrar Resultados
-        df_pred = pd.DataFrame(predictions)
-        
-        c1, c2 = st.columns(2)
-        with c1:
-            st.success("Modelo actualizado correctamente.")
-            st.dataframe(df_pred)
+            # 3. Mostrar Resultados
+            df_pred = pd.DataFrame(predictions)
             
-        with c2:
-            # Gráfico de proyección
-            pred_chart = df_pred.set_index('Fecha')[['Ventas Proyectadas', 'Gastos Proyectados']]
-            st.line_chart(pred_chart)
+            c1, c2 = st.columns(2)
+            with c1:
+                st.success("Modelo actualizado correctamente.")
+                st.dataframe(df_pred)
+                
+            with c2:
+                # Gráfico de proyección
+                st.line_chart(df_pred, x='Fecha', y=['Ventas Proyectadas', 'Gastos Proyectados'])
